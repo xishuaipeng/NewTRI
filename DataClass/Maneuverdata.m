@@ -1,0 +1,146 @@
+classdef Maneuverdata
+    properties
+        dataID;
+        logField;
+        eventField;
+        X;
+        Y;
+        Z;
+        trainingIndex;
+%         trainingData;
+%         trainingLabel;
+%         trainingFrame;
+    end
+    methods(Static)
+        function y = LabelManeuver(eventFrame, x)
+            [r,c] = size(x);
+            frame = zeros(r,2);
+            for i = 1:r
+               frame(i,:) = [min(x{i,1}(:,1)), max(x{i,1}(:,1))]; 
+            end
+            y = zeros(r,1); 
+            eventNum = size(eventFrame,1);
+            for j = 1:eventNum
+                  event_start = eventFrame(j,1);
+                  event_last =  eventFrame(j,2);
+                  event = find(eventFrame(j,3:end)==1);
+                for i= 1:r
+                    seq_start = min(x{i}(:,1));
+                    seq_last = max(x{i}(:,1));     
+                    start = max(event_start, seq_start);
+                    last = min(event_last, seq_last);
+                    duration = last - start;
+                    radio_event = duration /(event_last - event_start);
+                    radio_seq  =  duration /(seq_last - seq_start);
+                    radio = max(radio_event,radio_seq);
+                    if radio > 0.7
+                        y(i) = event;
+                    end
+                end
+            end   
+        end
+        function data = Normalize(data)
+            [row, col] = size(data);
+            mean_v = mean(data,1);
+            var_v = var(data,[],1);
+            mean_v = repmat(mean_v,row,1);
+            var_v = repmat(var_v,row,1);
+            data = (data - mean_v)./((var_v.^2+ 1e-5).^(0.5));
+        end
+
+    end
+    methods
+ 
+
+        function obj = Maneuverdata(dataID)
+            obj.dataID =dataID;
+            obj.logField ={'time','speed','GPS_long','GPS_lat','GPS_heading','distance'};
+            obj.eventField = {'TurnLeft','TurnRight','LaneChangeLeft','LaneChangeRight'};
+            obj.X =[];
+            obj.Y =[];
+        end
+        function obj = trainData(varargin)
+            %select positive
+            obj = varargin{1};
+            trainRadio = 1;
+            if isempty(obj.X) || isempty(obj.Y)
+                obj = obj.sequenceData();
+            end
+
+            allIndex = [1:1:length(obj.Y)];
+                   
+            negIndex = find(obj.Y == 0);
+            negData = obj.X(negIndex);
+     
+            posIndex = allIndex;
+            posIndex(negIndex) = [];
+            
+            posNum =  round(length(posIndex) * trainRadio);
+            negNum = round(posNum/length(obj.eventField));
+            %
+            strongNeg = cellfun(@(x) mean(x(:,1)), negData);
+            [sortNeg,negSortIndex] =sort(strongNeg,'descend');
+            negIndex = negIndex(negSortIndex);
+            obj.trainingIndex = [posIndex'; negIndex(1:negNum)];
+
+            obj.trainingData =  obj.X(obj.trainingIndex);
+            obj.trainingLabel = obj.Y(obj.trainingIndex);
+            obj.trainingFrame = obj.Z(obj.trainingIndex);
+            
+        end
+        
+        
+        function obj = sequenceData(varargin)
+            obj = varargin{1};
+            data = Dataset(obj.dataID, obj.logField, obj.eventField);
+            data = data.readLogdata();
+            data = data.reSync('./input/sycnFile.txt');
+            data = data.resampLogdata('distance',0.002);
+            data = data.labelSampledata();
+            X = data.sampleData;
+            %exttact vgg19 feature
+            videoObj = VideoReader(data.videoPath);
+            maxFrame = videoObj.NumberOfFrames;
+            X(X.frame < 1 | X.frame>maxFrame,:)=[];
+            frameIndex = X.frame;
+            maxFrame = length(frameIndex);
+            vggFeature = zeros(maxFrame,4096);
+            net = vgg19;
+            parfor i =1 : maxFrame
+                curFrame = frameIndex(i);
+                curImage = read(videoObj,curFrame);
+                vggFeature(i,:) = vgg19Feature(curImage,net);
+            end
+            X.vgg = vggFeature;
+            %extra curvaturekappa = Curvature(x,y)
+            kappa = Curvature(X.GPS_long,X.GPS_lat);
+            kappa(kappa>1000) =1000;
+            kappa(isnan(kappa)) =1000;
+            X.curvature = kappa;
+            %checkCurvature(X.GPS_long,X.GPS_lat,kappa);     
+            %construct data and label
+            
+            
+            obj.X = [X.curvature/1000,X.GPS_heading/360,X.speed/200,X.vgg];
+
+            
+            
+            %obj.Y =  X.label;
+            %{'time','speed','GPS_long','GPS_lat','GPS_heading','distance'};
+            window = floor(0.05/data.samplingStep);
+            step = floor(0.05/data.samplingrStep);
+            obj.X = data.table2sequence(obj.X ,window, step); 
+            obj.X = cellfun(@(x) x', obj.X,'UniformOutput',false);
+            obj.Z = data.table2sequence(X.frame ,window, step);   
+            obj.Y = obj.LabelManeuver(data.eventFrame, obj.Z );
+            
+           
+            %obj.Y = data.table2sequence(obj.Y ,window, step ); 
+            
+        end
+        
+
+
+    end
+    
+end
